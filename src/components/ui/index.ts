@@ -13,3 +13,4 @@ export { DatePicker, DateRangePicker } from './DatePicker';
 export { Slider } from './Slider';
 export { TimePicker, formatTime12Hour, formatTime24Hour } from './TimePicker';
 export { HashtagInput } from './HashtagInput';
+export { Select, TIMEZONE_OPTIONS } from './Select';

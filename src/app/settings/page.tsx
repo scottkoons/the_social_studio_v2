@@ -13,6 +13,8 @@ import {
   Button,
   Textarea,
   RadioGroup,
+  Select,
+  TIMEZONE_OPTIONS,
   Spinner,
   toast,
 } from '@/components/ui';
@@ -20,11 +22,12 @@ import {
 export default function SettingsPage() {
   const { user, signOut } = useAuth();
   const { theme, setTheme } = useTheme();
-  const { workspace, loading, updateAI } = useWorkspace();
+  const { workspace, loading, updateAI, updateScheduling } = useWorkspace();
 
   const [brandVoice, setBrandVoice] = useState('');
   const [hashtagStyle, setHashtagStyle] = useState<'minimal' | 'moderate' | 'heavy'>('moderate');
   const [emojiStyle, setEmojiStyle] = useState<'low' | 'medium' | 'high'>('medium');
+  const [timezone, setTimezone] = useState('America/Denver');
   const [saving, setSaving] = useState(false);
 
   // Load workspace settings when available
@@ -34,16 +37,24 @@ export default function SettingsPage() {
       setHashtagStyle(workspace.settings.ai.hashtagStyle || 'moderate');
       setEmojiStyle(workspace.settings.ai.emojiStyle || 'medium');
     }
+    if (workspace?.settings?.scheduling) {
+      setTimezone(workspace.settings.scheduling.timezone || 'America/Denver');
+    }
   }, [workspace]);
 
   const handleSave = async () => {
     setSaving(true);
     try {
-      await updateAI({
-        brandVoice,
-        hashtagStyle,
-        emojiStyle,
-      });
+      await Promise.all([
+        updateAI({
+          brandVoice,
+          hashtagStyle,
+          emojiStyle,
+        }),
+        updateScheduling({
+          timezone,
+        }),
+      ]);
       toast.success('Settings saved successfully');
     } catch (error) {
       console.error('Error saving settings:', error);
@@ -116,6 +127,29 @@ export default function SettingsPage() {
                     </div>
                   </>
                 )}
+              </CardContent>
+            </Card>
+
+            {/* Scheduling */}
+            <Card padding="none">
+              <CardHeader>
+                <h2 className="text-lg font-semibold text-gray-900 dark:text-white">
+                  Scheduling
+                </h2>
+              </CardHeader>
+              <CardContent padding="lg">
+                <Select
+                  label="Timezone"
+                  value={timezone}
+                  onChange={(e) => setTimezone(e.target.value)}
+                  options={TIMEZONE_OPTIONS}
+                  helperText="Used for scheduling posts at the correct local time"
+                />
+                <div className="mt-4">
+                  <Button onClick={handleSave} isLoading={saving}>
+                    Save Settings
+                  </Button>
+                </div>
               </CardContent>
             </Card>
 
