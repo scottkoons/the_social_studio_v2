@@ -1,18 +1,25 @@
 'use client';
 
-import { createContext, useContext, useEffect, useState, ReactNode } from 'react';
+import { createContext, useContext, useEffect, useState, ReactNode, useRef } from 'react';
 import {
   User as FirebaseUser,
   onAuthStateChanged,
   signInWithPopup,
   signOut as firebaseSignOut,
+  Unsubscribe,
 } from 'firebase/auth';
-import { getFirebaseAuth, getGoogleProvider } from '@/lib/firebase';
+import {
+  getFirebaseAuthSafe,
+  getGoogleProvider,
+  isFirebaseAvailable,
+  getFirebaseInitError,
+} from '@/lib/firebase';
 import type { User } from '@/types';
 
 interface AuthContextType {
   user: User | null;
   loading: boolean;
+  error: Error | null;
   signInWithGoogle: () => Promise<void>;
   signOut: () => Promise<void>;
 }
@@ -32,6 +39,10 @@ function mapFirebaseUser(firebaseUser: FirebaseUser | null): User | null {
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<Error | null>(null);
+
+  // Track if we've already attempted initialization (prevents retry loops)
+  const initAttempted = useRef(false);
 
   useEffect(() => {
     // Only run on client
@@ -40,42 +51,110 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       return;
     }
 
-    const auth = getFirebaseAuth();
-    const unsubscribe = onAuthStateChanged(auth, (firebaseUser) => {
-      setUser(mapFirebaseUser(firebaseUser));
-      setLoading(false);
-    });
+    // Prevent multiple initialization attempts
+    if (initAttempted.current) {
+      return;
+    }
+    initAttempted.current = true;
 
-    return () => unsubscribe();
+    // Check if Firebase is available before attempting to use it
+    if (!isFirebaseAvailable()) {
+      const initError = getFirebaseInitError();
+      setError(
+        initError ||
+          new Error(
+            'Firebase is not configured. Please check your environment variables.'
+          )
+      );
+      setLoading(false);
+      return;
+    }
+
+    // Try to get Firebase Auth (this may fail if config is invalid)
+    const auth = getFirebaseAuthSafe();
+
+    if (!auth) {
+      const initError = getFirebaseInitError();
+      setError(
+        initError ||
+          new Error('Failed to initialize Firebase Authentication.')
+      );
+      setLoading(false);
+      return;
+    }
+
+    // Set up auth state listener
+    let unsubscribe: Unsubscribe | undefined;
+
+    try {
+      unsubscribe = onAuthStateChanged(
+        auth,
+        (firebaseUser) => {
+          setUser(mapFirebaseUser(firebaseUser));
+          setLoading(false);
+          setError(null);
+        },
+        (authError) => {
+          console.error('Auth state change error:', authError);
+          setError(authError);
+          setLoading(false);
+        }
+      );
+    } catch (err) {
+      console.error('Failed to set up auth listener:', err);
+      setError(err instanceof Error ? err : new Error(String(err)));
+      setLoading(false);
+    }
+
+    return () => {
+      if (unsubscribe) {
+        unsubscribe();
+      }
+    };
   }, []);
 
   const signInWithGoogle = async () => {
     if (typeof window === 'undefined') return;
 
+    // Check for existing error state
+    if (error) {
+      throw error;
+    }
+
+    const auth = getFirebaseAuthSafe();
+    if (!auth) {
+      throw new Error('Firebase Authentication is not available.');
+    }
+
     try {
-      const auth = getFirebaseAuth();
       const provider = getGoogleProvider();
       await signInWithPopup(auth, provider);
-    } catch (error) {
-      console.error('Error signing in with Google:', error);
-      throw error;
+    } catch (err) {
+      console.error('Error signing in with Google:', err);
+      throw err;
     }
   };
 
   const signOut = async () => {
     if (typeof window === 'undefined') return;
 
+    const auth = getFirebaseAuthSafe();
+    if (!auth) {
+      // If auth isn't available, just clear local state
+      setUser(null);
+      return;
+    }
+
     try {
-      const auth = getFirebaseAuth();
       await firebaseSignOut(auth);
-    } catch (error) {
-      console.error('Error signing out:', error);
-      throw error;
+    } catch (err) {
+      console.error('Error signing out:', err);
+      throw err;
     }
   };
 
   return (
-    <AuthContext.Provider value={{ user, loading, signInWithGoogle, signOut }}>
+    <AuthContext.Provider value={{ user, loading, error, signInWithGoogle, signOut }}>
       {children}
     </AuthContext.Provider>
   );

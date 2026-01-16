@@ -18,15 +18,17 @@ import { Auth, getAuth, GoogleAuthProvider } from 'firebase/auth';
 import { Firestore, getFirestore } from 'firebase/firestore';
 import { FirebaseStorage, getStorage } from 'firebase/storage';
 
-// Required environment variable keys
-const REQUIRED_ENV_VARS = [
-  'NEXT_PUBLIC_FIREBASE_API_KEY',
-  'NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN',
-  'NEXT_PUBLIC_FIREBASE_PROJECT_ID',
-  'NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET',
-  'NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID',
-  'NEXT_PUBLIC_FIREBASE_APP_ID',
-] as const;
+// Required environment variable keys with human-readable descriptions
+const REQUIRED_ENV_VARS = {
+  NEXT_PUBLIC_FIREBASE_API_KEY: 'API Key',
+  NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN: 'Auth Domain',
+  NEXT_PUBLIC_FIREBASE_PROJECT_ID: 'Project ID',
+  NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET: 'Storage Bucket',
+  NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID: 'Messaging Sender ID',
+  NEXT_PUBLIC_FIREBASE_APP_ID: 'App ID',
+} as const;
+
+type EnvVarKey = keyof typeof REQUIRED_ENV_VARS;
 
 // Module-level singletons (lazy initialized)
 let app: FirebaseApp | null = null;
@@ -35,49 +37,110 @@ let db: Firestore | null = null;
 let storage: FirebaseStorage | null = null;
 let googleProvider: GoogleAuthProvider | null = null;
 let initializationError: Error | null = null;
+let hasLoggedEnvStatus = false;
+
+/**
+ * Checks if an environment variable is properly set (not empty, undefined, or literal "undefined")
+ */
+function isEnvVarSet(key: string): boolean {
+  const value = process.env[key];
+  return Boolean(value && value !== 'undefined' && value.trim() !== '');
+}
+
+/**
+ * Logs a grouped console message showing environment variable status.
+ * Only logs once per session to avoid spam.
+ */
+function logEnvVarStatus(missingVars: EnvVarKey[], presentVars: EnvVarKey[]): void {
+  if (hasLoggedEnvStatus) return;
+  hasLoggedEnvStatus = true;
+
+  // Only log in browser (not during SSR/build)
+  if (typeof window === 'undefined') return;
+
+  const allMissing = missingVars.length === Object.keys(REQUIRED_ENV_VARS).length;
+
+  console.group(
+    `%c🔥 Firebase Configuration ${missingVars.length > 0 ? 'ERROR' : 'OK'}`,
+    `color: ${missingVars.length > 0 ? '#ef4444' : '#22c55e'}; font-weight: bold; font-size: 14px;`
+  );
+
+  if (missingVars.length > 0) {
+    console.log(
+      '%c❌ Missing environment variables:',
+      'color: #ef4444; font-weight: bold;'
+    );
+    missingVars.forEach((key) => {
+      console.log(`   • ${key} (${REQUIRED_ENV_VARS[key]})`);
+    });
+  }
+
+  if (presentVars.length > 0 && !allMissing) {
+    console.log(
+      '%c✅ Present environment variables:',
+      'color: #22c55e; font-weight: bold;'
+    );
+    presentVars.forEach((key) => {
+      console.log(`   • ${key} (${REQUIRED_ENV_VARS[key]})`);
+    });
+  }
+
+  if (missingVars.length > 0) {
+    console.log('');
+    console.log(
+      '%c📋 To fix this:',
+      'color: #3b82f6; font-weight: bold;'
+    );
+    console.log('   1. Copy .env.local.example to .env.local');
+    console.log('   2. Fill in your Firebase credentials from Firebase Console');
+    console.log('   3. Restart the dev server (Ctrl+C, then npm run dev)');
+    console.log('');
+    console.log(
+      '%c📖 See README.md "Firebase Setup (Required)" for detailed instructions.',
+      'color: #8b5cf6;'
+    );
+  }
+
+  console.groupEnd();
+}
 
 /**
  * Validates that all required Firebase environment variables are present.
  * Returns the config object if valid, throws descriptive error if not.
  */
 function getValidatedFirebaseConfig(): Record<string, string> {
-  const config: Record<string, string | undefined> = {
-    apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY,
-    authDomain: process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN,
-    projectId: process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID,
-    storageBucket: process.env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET,
-    messagingSenderId: process.env.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID,
-    appId: process.env.NEXT_PUBLIC_FIREBASE_APP_ID,
-  };
+  const envVarKeys = Object.keys(REQUIRED_ENV_VARS) as EnvVarKey[];
 
-  // In development, log which env vars are present (boolean only, not values)
-  if (process.env.NODE_ENV === 'development' && typeof window !== 'undefined') {
-    console.log('[Firebase] Environment variable check:', {
-      NEXT_PUBLIC_FIREBASE_API_KEY: !!process.env.NEXT_PUBLIC_FIREBASE_API_KEY,
-      NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN: !!process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN,
-      NEXT_PUBLIC_FIREBASE_PROJECT_ID: !!process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID,
-      NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET: !!process.env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET,
-      NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID: !!process.env.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID,
-      NEXT_PUBLIC_FIREBASE_APP_ID: !!process.env.NEXT_PUBLIC_FIREBASE_APP_ID,
-    });
+  const missingVars = envVarKeys.filter((key) => !isEnvVarSet(key));
+  const presentVars = envVarKeys.filter((key) => isEnvVarSet(key));
+
+  // Log status in development (only once)
+  if (process.env.NODE_ENV === 'development') {
+    logEnvVarStatus(missingVars, presentVars);
   }
-
-  // Check for missing environment variables
-  const missingVars = REQUIRED_ENV_VARS.filter(
-    (key) => !process.env[key] || process.env[key] === 'undefined'
-  );
 
   if (missingVars.length > 0) {
-    throw new Error(
-      `Firebase configuration error: Missing required environment variables:\n` +
-        `  ${missingVars.join('\n  ')}\n\n` +
-        `Please ensure these are set in your .env.local file.\n` +
-        `After adding/modifying .env.local, restart your dev server.`
-    );
+    const errorMessage =
+      `Firebase configuration error: Missing ${missingVars.length} required environment variable(s).\n\n` +
+      `Missing:\n${missingVars.map((k) => `  • ${k}`).join('\n')}\n\n` +
+      `To fix:\n` +
+      `  1. Create .env.local from .env.local.example\n` +
+      `  2. Add your Firebase credentials\n` +
+      `  3. Restart the dev server\n\n` +
+      `See README.md for detailed setup instructions.`;
+
+    throw new Error(errorMessage);
   }
 
-  // TypeScript: at this point all values are guaranteed to be defined strings
-  return config as Record<string, string>;
+  // Build and return the config object
+  return {
+    apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY!,
+    authDomain: process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN!,
+    projectId: process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID!,
+    storageBucket: process.env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET!,
+    messagingSenderId: process.env.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID!,
+    appId: process.env.NEXT_PUBLIC_FIREBASE_APP_ID!,
+  };
 }
 
 /**
@@ -98,7 +161,7 @@ function initializeFirebase(): FirebaseApp {
     );
   }
 
-  // Check if there was a previous initialization error
+  // Check if there was a previous initialization error (prevents retry loops)
   if (initializationError) {
     throw initializationError;
   }
@@ -217,18 +280,34 @@ export function getFirebaseStorageSafe(): FirebaseStorage | null {
 /**
  * Checks if Firebase is available and properly configured.
  * Returns true if Firebase can be initialized, false otherwise.
+ * Does NOT log errors or trigger the grouped console output.
  */
 export function isFirebaseAvailable(): boolean {
   if (typeof window === 'undefined') {
     return false;
   }
 
-  try {
-    getValidatedFirebaseConfig();
+  // Check if already initialized successfully
+  if (app) {
     return true;
-  } catch {
+  }
+
+  // Check if there was a previous error
+  if (initializationError) {
     return false;
   }
+
+  // Check if all env vars are present
+  const envVarKeys = Object.keys(REQUIRED_ENV_VARS) as EnvVarKey[];
+  return envVarKeys.every((key) => isEnvVarSet(key));
+}
+
+/**
+ * Returns the cached initialization error, if any.
+ * Useful for displaying error states in UI without re-throwing.
+ */
+export function getFirebaseInitError(): Error | null {
+  return initializationError;
 }
 
 /**
