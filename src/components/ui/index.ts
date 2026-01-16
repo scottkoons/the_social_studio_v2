@@ -9,3 +9,5 @@ export { PageHeader } from './PageHeader';
 export { EmptyState, CalendarIcon, DocumentIcon, PhotoIcon } from './EmptyState';
 export { Spinner, LoadingOverlay, Skeleton, CardSkeleton, TableRowSkeleton } from './Loading';
 export { Dropdown, DropdownItem, DropdownSeparator } from './Dropdown';
+export { DatePicker, DateRangePicker } from './DatePicker';
+export { Slider } from './Slider';
