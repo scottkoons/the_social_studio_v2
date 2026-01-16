@@ -1,10 +1,14 @@
 'use client';
 
 import { AuthGuard, Navbar } from '@/components/layout';
-import { Card, PageHeader, Button, EmptyState, CalendarIcon } from '@/components/ui';
+import { Card, PageHeader, Button, EmptyState, CalendarIcon, Skeleton } from '@/components/ui';
+import { usePostsStats, usePostsThisWeek } from '@/hooks';
 import Link from 'next/link';
 
 export default function DashboardPage() {
+  const stats = usePostsStats();
+  const { posts: thisWeekPosts, loading: loadingThisWeek } = usePostsThisWeek();
+
   return (
     <AuthGuard>
       <div className="min-h-screen bg-gray-50 dark:bg-gray-900">
@@ -24,27 +28,31 @@ export default function DashboardPage() {
           <div className="mb-8 grid gap-6 sm:grid-cols-2 lg:grid-cols-4">
             <SummaryCard
               title="Posts This Week"
-              value="0"
+              value={loadingThisWeek ? '-' : String(thisWeekPosts.length)}
               description="Scheduled posts"
               color="primary"
+              loading={loadingThisWeek}
             />
             <SummaryCard
               title="Pending Generation"
-              value="0"
+              value={stats.loading ? '-' : String(stats.draft)}
               description="Awaiting AI captions"
               color="warning"
+              loading={stats.loading}
             />
             <SummaryCard
               title="Ready to Export"
-              value="0"
+              value={stats.loading ? '-' : String(stats.generated)}
               description="Complete posts"
               color="success"
+              loading={stats.loading}
             />
             <SummaryCard
               title="Total Posts"
-              value="0"
+              value={stats.loading ? '-' : String(stats.total)}
               description="All time"
               color="default"
+              loading={stats.loading}
             />
           </div>
 
@@ -81,25 +89,91 @@ export default function DashboardPage() {
             </div>
           </div>
 
-          {/* Recent Activity */}
+          {/* Recent Posts */}
           <div>
             <h2 className="mb-4 text-lg font-semibold text-gray-900 dark:text-white">
-              Recent Activity
+              This Week
             </h2>
-            <EmptyState
-              icon={<CalendarIcon className="h-6 w-6" />}
-              title="No recent activity"
-              description="Create your first schedule to get started"
-              action={
-                <Link href="/planning">
-                  <Button>Get Started</Button>
-                </Link>
-              }
-            />
+            {loadingThisWeek ? (
+              <Card padding="md">
+                <div className="space-y-3">
+                  <Skeleton className="h-4 w-1/3" />
+                  <Skeleton className="h-4 w-full" />
+                  <Skeleton className="h-4 w-2/3" />
+                </div>
+              </Card>
+            ) : thisWeekPosts.length === 0 ? (
+              <EmptyState
+                icon={<CalendarIcon className="h-6 w-6" />}
+                title="No posts scheduled this week"
+                description="Create your first schedule to get started"
+                action={
+                  <Link href="/planning">
+                    <Button>Get Started</Button>
+                  </Link>
+                }
+              />
+            ) : (
+              <Card padding="none">
+                <div className="divide-y divide-gray-200 dark:divide-gray-700">
+                  {thisWeekPosts.slice(0, 5).map((post) => (
+                    <div
+                      key={post.date}
+                      className="flex items-center justify-between px-6 py-4"
+                    >
+                      <div className="flex items-center gap-4">
+                        <div className="text-sm font-medium text-gray-900 dark:text-white">
+                          {formatDate(post.date)}
+                        </div>
+                        <StatusDot status={post.status} />
+                      </div>
+                      <div className="text-sm text-gray-500 dark:text-gray-400 truncate max-w-xs">
+                        {post.starterText || 'No content yet'}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                {thisWeekPosts.length > 5 && (
+                  <div className="border-t border-gray-200 px-6 py-3 dark:border-gray-700">
+                    <Link
+                      href="/calendar"
+                      className="text-sm font-medium text-primary-600 hover:text-primary-700 dark:text-primary-400"
+                    >
+                      View all {thisWeekPosts.length} posts
+                    </Link>
+                  </div>
+                )}
+              </Card>
+            )}
           </div>
         </main>
       </div>
     </AuthGuard>
+  );
+}
+
+function formatDate(dateStr: string): string {
+  const date = new Date(dateStr + 'T00:00:00');
+  return date.toLocaleDateString('en-US', {
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric',
+  });
+}
+
+function StatusDot({ status }: { status: string }) {
+  const colors = {
+    draft: 'bg-gray-400',
+    generated: 'bg-green-500',
+    edited: 'bg-blue-500',
+    exported: 'bg-amber-500',
+  };
+
+  return (
+    <span
+      className={`inline-block h-2 w-2 rounded-full ${colors[status as keyof typeof colors] || colors.draft}`}
+      title={status}
+    />
   );
 }
 
@@ -108,9 +182,10 @@ interface SummaryCardProps {
   value: string;
   description: string;
   color: 'primary' | 'success' | 'warning' | 'default';
+  loading?: boolean;
 }
 
-function SummaryCard({ title, value, description, color }: SummaryCardProps) {
+function SummaryCard({ title, value, description, color, loading }: SummaryCardProps) {
   const colorStyles = {
     primary: 'bg-primary-50 text-primary-600 dark:bg-primary-900/20 dark:text-primary-400',
     success: 'bg-green-50 text-green-600 dark:bg-green-900/20 dark:text-green-400',
@@ -122,7 +197,11 @@ function SummaryCard({ title, value, description, color }: SummaryCardProps) {
     <Card padding="md">
       <div className="flex items-center gap-4">
         <div className={`rounded-lg p-3 ${colorStyles[color]}`}>
-          <span className="text-2xl font-bold">{value}</span>
+          {loading ? (
+            <Skeleton className="h-8 w-8" />
+          ) : (
+            <span className="text-2xl font-bold">{value}</span>
+          )}
         </div>
         <div>
           <p className="font-medium text-gray-900 dark:text-white">{title}</p>

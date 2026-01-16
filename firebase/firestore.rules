@@ -1,0 +1,54 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Helper function to check if user is authenticated
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    // Helper function to check if user owns the workspace
+    function isWorkspaceOwner(workspaceId) {
+      return isAuthenticated() && request.auth.uid == workspaceId;
+    }
+
+    // Helper function to validate post data
+    function isValidPost() {
+      let data = request.resource.data;
+      return data.date is string
+        && data.date.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$')
+        && data.starterText is string
+        && data.status in ['draft', 'generated', 'edited', 'exported'];
+    }
+
+    // Helper function to validate asset data
+    function isValidAsset() {
+      let data = request.resource.data;
+      return data.storagePath is string
+        && data.fileName is string
+        && data.contentType is string
+        && data.size is number;
+    }
+
+    // Workspace documents - user can only access their own workspace
+    match /workspaces/{workspaceId} {
+      allow read, write: if isWorkspaceOwner(workspaceId);
+
+      // Posts subcollection
+      match /posts/{postDate} {
+        allow read: if isWorkspaceOwner(workspaceId);
+        allow create: if isWorkspaceOwner(workspaceId) && isValidPost();
+        allow update: if isWorkspaceOwner(workspaceId);
+        allow delete: if isWorkspaceOwner(workspaceId);
+      }
+
+      // Assets subcollection
+      match /assets/{assetId} {
+        allow read: if isWorkspaceOwner(workspaceId);
+        allow create: if isWorkspaceOwner(workspaceId) && isValidAsset();
+        allow update: if isWorkspaceOwner(workspaceId);
+        allow delete: if isWorkspaceOwner(workspaceId);
+      }
+    }
+  }
+}
