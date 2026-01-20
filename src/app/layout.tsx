@@ -5,6 +5,7 @@ import './globals.css';
 import { AuthProvider } from '@/contexts/AuthContext';
 import { ThemeProvider } from '@/contexts/ThemeContext';
 import { ToastProvider } from '@/components/ui/Toast';
+import { FirebaseEnvDebug } from '@/components/FirebaseEnvDebug';
 
 const inter = Inter({
   subsets: ['latin'],
@@ -56,6 +57,7 @@ export default function RootLayout({
       <body className={`${inter.variable} font-sans antialiased`}>
         <ThemeProvider>
           <AuthProvider>
+            {process.env.NODE_ENV === 'development' && <FirebaseEnvDebug />}
             {children}
             <ToastProvider />
           </AuthProvider>

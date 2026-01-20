@@ -7,6 +7,7 @@ import {
   signInWithPopup,
   signOut as firebaseSignOut,
   Unsubscribe,
+  AuthError,
 } from 'firebase/auth';
 import {
   getFirebaseAuthSafe,
@@ -34,6 +35,22 @@ function mapFirebaseUser(firebaseUser: FirebaseUser | null): User | null {
     displayName: firebaseUser.displayName,
     photoURL: firebaseUser.photoURL,
   };
+}
+
+/**
+ * Check if an error is a user-cancelled popup (not a real error).
+ */
+function isPopupClosedError(error: unknown): boolean {
+  if (error instanceof Error) {
+    const authError = error as AuthError;
+    // Firebase error codes for popup closed/cancelled by user
+    return (
+      authError.code === 'auth/popup-closed-by-user' ||
+      authError.code === 'auth/cancelled-popup-request' ||
+      authError.code === 'auth/user-cancelled'
+    );
+  }
+  return false;
 }
 
 export function AuthProvider({ children }: { children: ReactNode }) {
@@ -128,9 +145,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     try {
       const provider = getGoogleProvider();
+      // Let Firebase handle the popup lifecycle entirely
       await signInWithPopup(auth, provider);
     } catch (err) {
-      console.error('Error signing in with Google:', err);
+      // Don't log or throw for user-cancelled popups (not a real error)
+      if (isPopupClosedError(err)) {
+        return;
+      }
+      // Log actual errors but don't spam console
+      if (process.env.NODE_ENV === 'development') {
+        console.error('Error signing in with Google:', err);
+      }
       throw err;
     }
   };
