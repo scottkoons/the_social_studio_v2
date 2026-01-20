@@ -3,6 +3,8 @@
  *
  * This module handles optimal day and time selection for social media posts
  * based on restaurant-focused engagement patterns.
+ *
+ * Posting windows are based on research for restaurant/food business engagement.
  */
 
 export interface ScheduledPost {
@@ -19,6 +21,33 @@ export interface ScheduleOptions {
   existingPostDates?: Set<string>;
 }
 
+interface TimeWindow {
+  start: number; // Hours in 24hr format (e.g., 11.5 = 11:30 AM)
+  end: number;
+}
+
+// Day-specific posting windows
+// 0 = Sunday, 1 = Monday, ..., 6 = Saturday
+const INSTAGRAM_WINDOWS: Record<number, TimeWindow[]> = {
+  0: [{ start: 9, end: 14 }],           // Sunday: 9:00 AM – 2:00 PM
+  1: [{ start: 11.5, end: 13.5 }],      // Monday: 11:30 AM – 1:30 PM
+  2: [{ start: 11.5, end: 13.5 }],      // Tuesday: 11:30 AM – 1:30 PM
+  3: [{ start: 11, end: 13 }, { start: 17, end: 18 }],  // Wednesday: 11:00 AM – 1:00 PM and 5:00 PM – 6:00 PM
+  4: [{ start: 11, end: 13 }, { start: 16, end: 17 }],  // Thursday: 11:00 AM – 1:00 PM and 4:00 PM – 5:00 PM
+  5: [{ start: 9, end: 11 }, { start: 15, end: 17 }],   // Friday: 9:00 AM – 11:00 AM and 3:00 PM – 5:00 PM
+  6: [{ start: 10, end: 13 }],          // Saturday: 10:00 AM – 1:00 PM
+};
+
+const FACEBOOK_WINDOWS: Record<number, TimeWindow[]> = {
+  0: [{ start: 10, end: 13 }],          // Sunday: 10:00 AM – 1:00 PM
+  1: [{ start: 12, end: 15 }],          // Monday: 12:00 PM – 3:00 PM
+  2: [{ start: 12, end: 15 }],          // Tuesday: 12:00 PM – 3:00 PM
+  3: [{ start: 11, end: 14 }],          // Wednesday: 11:00 AM – 2:00 PM
+  4: [{ start: 13, end: 16 }],          // Thursday: 1:00 PM – 4:00 PM
+  5: [{ start: 11, end: 13 }],          // Friday: 11:00 AM – 1:00 PM
+  6: [{ start: 9, end: 11 }],           // Saturday: 9:00 AM – 11:00 AM
+};
+
 // Day engagement rankings (0 = Sunday, 6 = Saturday)
 // Lower rank = higher priority
 const DAY_PRIORITY: Record<number, number> = {
@@ -31,32 +60,24 @@ const DAY_PRIORITY: Record<number, number> = {
   6: 2, // Saturday - high engagement
 };
 
-// Primary and secondary time windows for Facebook (Denver time)
-const FB_WINDOWS = {
-  primary: { start: 11, end: 13 }, // 11:00 AM - 1:00 PM
-  secondary: { start: 16.5, end: 18.5 }, // 4:30 PM - 6:30 PM
-};
-
-// Primary and secondary time windows for Instagram (Denver time)
-const IG_WINDOWS = {
-  primary: { start: 11.5, end: 13.5 }, // 11:30 AM - 1:30 PM
-  secondary: { start: 19, end: 21 }, // 7:00 PM - 9:00 PM
-};
+/**
+ * Pick a random window from available windows for a day
+ */
+function pickRandomWindow(windows: TimeWindow[]): TimeWindow {
+  const index = Math.floor(Math.random() * windows.length);
+  return windows[index];
+}
 
 /**
  * Generate a random time within a window, rounded to 5-minute increments
  */
-function randomTimeInWindow(
-  window: { start: number; end: number },
-  isWeekend: boolean
-): string {
-  // Shift windows +1 hour on weekends
-  const shift = isWeekend ? 1 : 0;
-  const start = window.start + shift;
-  const end = window.end + shift;
+function randomTimeInWindow(window: TimeWindow): string {
+  const startMinutes = Math.floor(window.start * 60);
+  const endMinutes = Math.floor(window.end * 60);
+  const rangeMinutes = endMinutes - startMinutes;
 
   // Random time within window
-  const totalMinutes = Math.floor(start * 60) + Math.floor(Math.random() * ((end - start) * 60));
+  const totalMinutes = startMinutes + Math.floor(Math.random() * rangeMinutes);
 
   // Round to 5-minute increments
   const roundedMinutes = Math.round(totalMinutes / 5) * 5;
@@ -69,20 +90,16 @@ function randomTimeInWindow(
 
 /**
  * Generate Facebook and Instagram times for a given day
- * Ensures at least 2 hours gap between platforms
  */
-function generateTimesForDay(
-  dayOfWeek: number,
-  usePrimaryForFb: boolean
-): { facebookTime: string; instagramTime: string } {
-  const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
+function generateTimesForDay(dayOfWeek: number): { facebookTime: string; instagramTime: string } {
+  const igWindows = INSTAGRAM_WINDOWS[dayOfWeek];
+  const fbWindows = FACEBOOK_WINDOWS[dayOfWeek];
 
-  // Alternate between primary and secondary windows
-  const fbWindow = usePrimaryForFb ? FB_WINDOWS.primary : FB_WINDOWS.secondary;
-  const igWindow = usePrimaryForFb ? IG_WINDOWS.secondary : IG_WINDOWS.primary;
+  const igWindow = pickRandomWindow(igWindows);
+  const fbWindow = pickRandomWindow(fbWindows);
 
-  const facebookTime = randomTimeInWindow(fbWindow, isWeekend);
-  const instagramTime = randomTimeInWindow(igWindow, isWeekend);
+  const instagramTime = randomTimeInWindow(igWindow);
+  const facebookTime = randomTimeInWindow(fbWindow);
 
   return { facebookTime, instagramTime };
 }
@@ -192,10 +209,8 @@ export function generateSchedule(options: ScheduleOptions): ScheduledPost[] {
   const selectedDates = selectOptimalDays(allDates, postsPerWeek, existingPostDates);
 
   // Generate schedule with times
-  const schedule: ScheduledPost[] = selectedDates.map((date, index) => {
-    // Alternate between primary and secondary windows
-    const usePrimaryForFb = index % 2 === 0;
-    const { facebookTime, instagramTime } = generateTimesForDay(date.getDay(), usePrimaryForFb);
+  const schedule: ScheduledPost[] = selectedDates.map((date) => {
+    const { facebookTime, instagramTime } = generateTimesForDay(date.getDay());
 
     return {
       date: formatDate(date),
@@ -221,13 +236,8 @@ export function getWeeksInRange(startDate: string, endDate: string): number {
 /**
  * Get recommended posts per week based on date range
  */
-export function getRecommendedPostsPerWeek(startDate: string, endDate: string): number {
-  const weeks = getWeeksInRange(startDate, endDate);
-
-  // For short ranges, recommend more posts per week
-  if (weeks <= 1) return 5;
-  if (weeks <= 2) return 4;
-  return 5; // Default recommendation
+export function getRecommendedPostsPerWeek(_startDate: string, _endDate: string): number {
+  return 7; // Default to daily posts
 }
 
 /**
@@ -270,4 +280,19 @@ export function formatTimeForDisplay(time24: string): string {
   const period = hours >= 12 ? 'PM' : 'AM';
   const hours12 = hours % 12 || 12;
   return `${hours12}:${minutes.toString().padStart(2, '0')} ${period}`;
+}
+
+/**
+ * Generate a single time for a specific platform and day
+ */
+export function generateTimeForPlatform(
+  platform: 'facebook' | 'instagram',
+  dayOfWeek: number
+): string {
+  const windows = platform === 'instagram'
+    ? INSTAGRAM_WINDOWS[dayOfWeek]
+    : FACEBOOK_WINDOWS[dayOfWeek];
+
+  const window = pickRandomWindow(windows);
+  return randomTimeInWindow(window);
 }

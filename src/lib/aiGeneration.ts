@@ -1,12 +1,11 @@
 /**
  * AI Caption Generation Service
  *
- * This module provides mock AI generation for development.
- * In production, this would call Firebase Cloud Functions with OpenAI.
+ * This module calls the server-side API route that interfaces with OpenAI
+ * to generate social media captions and hashtags.
  */
 
-import { Timestamp } from 'firebase/firestore';
-import type { Post, WorkspaceSettings } from '@/types';
+import type { WorkspaceSettings } from '@/types';
 
 export interface GenerationResult {
   facebook: {
@@ -17,85 +16,44 @@ export interface GenerationResult {
     caption: string;
     hashtags: string[];
   };
+  model: string;
   confidence: number;
 }
 
-// Sample captions for different types of content
-const SAMPLE_CAPTIONS = {
-  facebook: [
-    "Stop by today and treat yourself to something special! Our team is ready to make your day a little brighter.",
-    "Nothing brings people together quite like good food and great company. Join us and make some memories!",
-    "Looking for the perfect spot to unwind? We've got you covered. Come see what's on tap!",
-    "Weekend plans? We've got you covered with delicious food and refreshing drinks. See you soon!",
-    "There's always something brewing here. Pop in and discover your new favorite!",
-  ],
-  instagram: [
-    "Your next favorite spot is waiting. Link in bio!",
-    "Good vibes only. Tag someone who needs to see this!",
-    "This is your sign to treat yourself today.",
-    "Weekend mode: activated. Who's joining us?",
-    "Made with love, served with a smile.",
-  ],
-};
-
-const SAMPLE_HASHTAGS = {
-  minimal: ['#localfood', '#supportlocal', '#foodie'],
-  moderate: ['#localfood', '#supportlocal', '#foodie', '#yum', '#instafood', '#foodstagram', '#delicious'],
-  heavy: ['#localfood', '#supportlocal', '#foodie', '#yum', '#instafood', '#foodstagram', '#delicious', '#foodporn', '#eeeeeats', '#foodgasm', '#tasty', '#nomnom', '#foodlover'],
-};
-
 /**
- * Generate AI captions for a post (mock implementation)
+ * Generate AI captions for a post using OpenAI
  */
 export async function generateCaptions(
   starterText: string,
   settings: WorkspaceSettings['settings']['ai'],
-  previousOutputs?: { fbCaption?: string; igCaption?: string }
+  _previousOutputs?: { fbCaption?: string; igCaption?: string }
 ): Promise<GenerationResult> {
-  // Simulate API delay
-  await new Promise((resolve) => setTimeout(resolve, 1000 + Math.random() * 1000));
+  const response = await fetch('/api/generate-caption', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      starterText,
+      brandVoice: settings.brandVoice,
+      hashtagStyle: settings.hashtagStyle,
+      emojiStyle: settings.emojiStyle,
+      platform: 'both',
+    }),
+  });
 
-  // Pick random captions
-  const fbIndex = Math.floor(Math.random() * SAMPLE_CAPTIONS.facebook.length);
-  const igIndex = Math.floor(Math.random() * SAMPLE_CAPTIONS.instagram.length);
-
-  let fbCaption = SAMPLE_CAPTIONS.facebook[fbIndex];
-  let igCaption = SAMPLE_CAPTIONS.instagram[igIndex];
-
-  // If starter text provided, incorporate it
-  if (starterText) {
-    fbCaption = `${starterText}\n\n${fbCaption}`;
-    igCaption = `${starterText}\n\n${igCaption}`;
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({}));
+    throw new Error(errorData.error || 'Failed to generate captions');
   }
 
-  // Add emojis based on style
-  if (settings.emojiStyle === 'medium') {
-    fbCaption = `🍺 ${fbCaption}`;
-    igCaption = `✨ ${igCaption}`;
-  } else if (settings.emojiStyle === 'high') {
-    fbCaption = `🍺🎉 ${fbCaption} 🙌`;
-    igCaption = `✨🔥 ${igCaption} 💯`;
-  }
-
-  // Get hashtags based on style
-  const hashtags = [...SAMPLE_HASHTAGS[settings.hashtagStyle]];
-
-  // Add some variation if regenerating
-  if (previousOutputs) {
-    // Shuffle hashtags for variation
-    hashtags.sort(() => Math.random() - 0.5);
-  }
+  const data = await response.json();
 
   return {
-    facebook: {
-      caption: fbCaption,
-      hashtags: hashtags.slice(0, settings.hashtagStyle === 'minimal' ? 3 : settings.hashtagStyle === 'moderate' ? 7 : 12),
-    },
-    instagram: {
-      caption: igCaption,
-      hashtags: hashtags.slice(0, settings.hashtagStyle === 'minimal' ? 4 : settings.hashtagStyle === 'moderate' ? 8 : 15),
-    },
-    confidence: 0.85 + Math.random() * 0.1,
+    facebook: data.facebook || { caption: '', hashtags: [] },
+    instagram: data.instagram || { caption: '', hashtags: [] },
+    model: data.model || 'gpt-4o-mini',
+    confidence: 0.95,
   };
 }
 

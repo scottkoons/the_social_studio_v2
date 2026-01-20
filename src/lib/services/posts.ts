@@ -15,14 +15,40 @@ import {
 import { getFirebaseDb } from '@/lib/firebase';
 import type { Post } from '@/types';
 
+/**
+ * Validate a date string format (YYYY-MM-DD)
+ */
+function isValidDateString(date: unknown): date is string {
+  if (typeof date !== 'string' || !date) {
+    return false;
+  }
+  return /^\d{4}-\d{2}-\d{2}$/.test(date);
+}
+
+/**
+ * Validate workspaceId
+ */
+function isValidWorkspaceId(id: unknown): id is string {
+  return typeof id === 'string' && id.length > 0;
+}
+
 // Get reference to posts collection for a workspace
 function getPostsCollection(workspaceId: string) {
+  if (!isValidWorkspaceId(workspaceId)) {
+    throw new Error('Invalid workspaceId: must be a non-empty string');
+  }
   const db = getFirebaseDb();
   return collection(db, 'workspaces', workspaceId, 'posts');
 }
 
 // Get reference to a specific post document
 function getPostDoc(workspaceId: string, date: string) {
+  if (!isValidWorkspaceId(workspaceId)) {
+    throw new Error('Invalid workspaceId: must be a non-empty string');
+  }
+  if (!isValidDateString(date)) {
+    throw new Error(`Invalid date: "${date}" - must be a string in YYYY-MM-DD format`);
+  }
   const db = getFirebaseDb();
   return doc(db, 'workspaces', workspaceId, 'posts', date);
 }
@@ -38,6 +64,10 @@ export async function createPost(
     instagram?: Post['instagram'];
   }
 ): Promise<Post> {
+  if (!isValidDateString(data.date)) {
+    throw new Error(`Cannot create post: invalid date "${data.date}"`);
+  }
+
   const postRef = getPostDoc(workspaceId, data.date);
 
   const post: Post = {
@@ -66,6 +96,29 @@ export async function createPostsBatch(
     instagram?: Post['instagram'];
   }>
 ): Promise<Post[]> {
+  if (!isValidWorkspaceId(workspaceId)) {
+    throw new Error('Invalid workspaceId: must be a non-empty string');
+  }
+
+  if (!Array.isArray(posts) || posts.length === 0) {
+    throw new Error('No posts to create');
+  }
+
+  // Validate all posts before starting the batch
+  const invalidPosts = posts
+    .map((p, i) => ({ index: i, date: p.date }))
+    .filter((p) => !isValidDateString(p.date));
+
+  if (invalidPosts.length > 0) {
+    const details = invalidPosts
+      .slice(0, 3)
+      .map((p) => `post ${p.index + 1}: "${p.date}"`)
+      .join(', ');
+    throw new Error(
+      `Cannot create posts: ${invalidPosts.length} post(s) have invalid dates (${details}${invalidPosts.length > 3 ? '...' : ''})`
+    );
+  }
+
   const db = getFirebaseDb();
   const batch = writeBatch(db);
   const createdPosts: Post[] = [];
@@ -212,10 +265,19 @@ export async function deletePost(workspaceId: string, date: string): Promise<voi
 
 // Delete multiple posts
 export async function deletePostsBatch(workspaceId: string, dates: string[]): Promise<void> {
+  if (!isValidWorkspaceId(workspaceId)) {
+    throw new Error('Invalid workspaceId: must be a non-empty string');
+  }
+
+  const validDates = dates.filter(isValidDateString);
+  if (validDates.length === 0) {
+    return; // Nothing to delete
+  }
+
   const db = getFirebaseDb();
   const batch = writeBatch(db);
 
-  for (const date of dates) {
+  for (const date of validDates) {
     const postRef = getPostDoc(workspaceId, date);
     batch.delete(postRef);
   }
@@ -225,6 +287,9 @@ export async function deletePostsBatch(workspaceId: string, dates: string[]): Pr
 
 // Check if a post exists
 export async function postExists(workspaceId: string, date: string): Promise<boolean> {
+  if (!isValidDateString(date)) {
+    return false;
+  }
   const postRef = getPostDoc(workspaceId, date);
   const snapshot = await getDoc(postRef);
   return snapshot.exists();

@@ -121,7 +121,7 @@ export default function ReviewPage() {
           },
           status: 'generated',
           aiMeta: {
-            model: 'mock-gpt-4',
+            model: result.model,
             generatedAt: Timestamp.now(),
             confidence: result.confidence,
           },
@@ -290,7 +290,7 @@ function PostCard({ post, platformFilter }: PostCardProps) {
         },
         status: 'generated',
         aiMeta: {
-          model: 'mock-gpt-4',
+          model: result.model,
           generatedAt: Timestamp.now(),
           confidence: result.confidence,
         },
