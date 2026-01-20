@@ -32,6 +32,29 @@ function isValidWorkspaceId(id: unknown): id is string {
   return typeof id === 'string' && id.length > 0;
 }
 
+/**
+ * Sanitize an object for Firestore by removing undefined values.
+ * Firestore does not accept undefined - use null for missing optional fields.
+ * This recursively processes nested objects.
+ */
+function sanitizeForFirestore<T extends Record<string, unknown>>(obj: T): T {
+  const result: Record<string, unknown> = {};
+
+  for (const [key, value] of Object.entries(obj)) {
+    if (value === undefined) {
+      // Skip undefined values entirely (omit from payload)
+      continue;
+    } else if (value !== null && typeof value === 'object' && !Array.isArray(value) && !(value instanceof Timestamp)) {
+      // Recursively sanitize nested objects (but not arrays, nulls, or Timestamps)
+      result[key] = sanitizeForFirestore(value as Record<string, unknown>);
+    } else {
+      result[key] = value;
+    }
+  }
+
+  return result as T;
+}
+
 // Get reference to posts collection for a workspace
 function getPostsCollection(workspaceId: string) {
   if (!isValidWorkspaceId(workspaceId)) {
@@ -70,16 +93,16 @@ export async function createPost(
 
   const postRef = getPostDoc(workspaceId, data.date);
 
-  const post: Post = {
+  const post = sanitizeForFirestore({
     date: data.date,
     starterText: data.starterText || '',
     imageUrl: data.imageUrl,
     facebook: data.facebook,
     instagram: data.instagram,
-    status: 'draft',
+    status: 'draft' as const,
     createdAt: Timestamp.now(),
     updatedAt: Timestamp.now(),
-  };
+  }) as Post;
 
   await setDoc(postRef, post);
   return post;
@@ -125,16 +148,16 @@ export async function createPostsBatch(
 
   for (const data of posts) {
     const postRef = getPostDoc(workspaceId, data.date);
-    const post: Post = {
+    const post = sanitizeForFirestore({
       date: data.date,
       starterText: data.starterText || '',
       imageUrl: data.imageUrl,
       facebook: data.facebook,
       instagram: data.instagram,
-      status: 'draft',
+      status: 'draft' as const,
       createdAt: Timestamp.now(),
       updatedAt: Timestamp.now(),
-    };
+    }) as Post;
     batch.set(postRef, post);
     createdPosts.push(post);
   }
@@ -205,10 +228,11 @@ export async function updatePost(
   data: Partial<Omit<Post, 'date' | 'createdAt'>>
 ): Promise<void> {
   const postRef = getPostDoc(workspaceId, date);
-  await updateDoc(postRef, {
+  const sanitizedData = sanitizeForFirestore({
     ...data,
     updatedAt: Timestamp.now(),
   });
+  await updateDoc(postRef, sanitizedData);
 }
 
 // Update post's starter text
