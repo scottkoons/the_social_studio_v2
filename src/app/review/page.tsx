@@ -9,6 +9,8 @@ import {
   updatePostFacebook,
   updatePostInstagram,
   updatePost,
+  changePostDate,
+  deletePostsBatch,
 } from '@/lib/services';
 import {
   generateCaptions,
@@ -19,6 +21,8 @@ import {
   PageHeader,
   Card,
   Button,
+  Modal,
+  ModalFooter,
   Toggle,
   Badge,
   StatusBadge,
@@ -50,9 +54,16 @@ export default function ReviewPage() {
   const [hidePast, setHidePast] = useState(true);
   const [hideEmpty, setHideEmpty] = useState(true);
 
+  // Selection state
+  const [selectedDates, setSelectedDates] = useState<Set<string>>(new Set());
+
   // Bulk generation state
   const [isGeneratingAll, setIsGeneratingAll] = useState(false);
   const [generationProgress, setGenerationProgress] = useState({ current: 0, total: 0 });
+
+  // Delete state
+  const [showDeleteModal, setShowDeleteModal] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
 
   // Get today's date
   const today = new Date().toISOString().split('T')[0];
@@ -87,6 +98,27 @@ export default function ReviewPage() {
         (!post.facebook || !post.instagram)
     );
   }, [filteredPosts]);
+
+  // Selection handlers
+  const toggleSelectAll = useCallback(() => {
+    if (selectedDates.size === filteredPosts.length) {
+      setSelectedDates(new Set());
+    } else {
+      setSelectedDates(new Set(filteredPosts.map((p) => p.date)));
+    }
+  }, [filteredPosts, selectedDates.size]);
+
+  const toggleSelect = useCallback((date: string) => {
+    setSelectedDates((prev) => {
+      const next = new Set(prev);
+      if (next.has(date)) {
+        next.delete(date);
+      } else {
+        next.add(date);
+      }
+      return next;
+    });
+  }, []);
 
   // Handle generate all
   const handleGenerateAll = useCallback(async () => {
@@ -138,6 +170,81 @@ export default function ReviewPage() {
     }
   }, [user, workspace, postsNeedingGeneration]);
 
+  // Regenerate selected posts
+  const handleRegenerateSelected = useCallback(async () => {
+    if (!user || !workspace || selectedDates.size === 0) return;
+
+    const selectedPosts = posts.filter(
+      (p) => selectedDates.has(p.date) && p.starterText.trim()
+    );
+
+    if (selectedPosts.length === 0) {
+      toast.error('No posts with starter text to regenerate');
+      return;
+    }
+
+    setIsGeneratingAll(true);
+    setGenerationProgress({ current: 0, total: selectedPosts.length });
+
+    try {
+      for (let i = 0; i < selectedPosts.length; i++) {
+        const post = selectedPosts[i];
+        setGenerationProgress({ current: i + 1, total: selectedPosts.length });
+
+        const result = await generateCaptions(post.starterText, workspace.settings.ai);
+
+        await updatePost(user.uid, post.date, {
+          facebook: {
+            caption: result.facebook.caption,
+            hashtags: result.facebook.hashtags,
+            scheduledTime: post.facebook?.scheduledTime || '12:00',
+            timeSource: 'ai' as const,
+          },
+          instagram: {
+            caption: result.instagram.caption,
+            hashtags: result.instagram.hashtags,
+            scheduledTime: post.instagram?.scheduledTime || '19:00',
+            timeSource: 'ai' as const,
+          },
+          status: 'generated',
+          aiMeta: {
+            model: result.model,
+            generatedAt: Timestamp.now(),
+            confidence: result.confidence,
+          },
+        });
+      }
+
+      toast.success(`Regenerated ${selectedPosts.length} post(s)`);
+      setSelectedDates(new Set());
+    } catch (error) {
+      console.error('Error regenerating:', error);
+      toast.error('Failed to regenerate some posts');
+    } finally {
+      setIsGeneratingAll(false);
+      setGenerationProgress({ current: 0, total: 0 });
+    }
+  }, [user, workspace, selectedDates, posts]);
+
+  // Delete selected posts
+  const handleDeleteSelected = useCallback(async () => {
+    if (!user || selectedDates.size === 0) return;
+
+    setIsDeleting(true);
+
+    try {
+      await deletePostsBatch(user.uid, Array.from(selectedDates));
+      toast.success(`Deleted ${selectedDates.size} post(s)`);
+      setSelectedDates(new Set());
+      setShowDeleteModal(false);
+    } catch (error) {
+      console.error('Error deleting posts:', error);
+      toast.error('Failed to delete posts');
+    } finally {
+      setIsDeleting(false);
+    }
+  }, [user, selectedDates]);
+
   return (
     <AuthGuard>
       <div className="min-h-screen bg-gray-50 dark:bg-gray-900">
@@ -148,15 +255,35 @@ export default function ReviewPage() {
             subtitle="Generate and edit AI captions for your posts"
             actions={
               <div className="flex gap-3">
-                {postsNeedingGeneration.length > 0 && (
-                  <Button
-                    onClick={handleGenerateAll}
-                    isLoading={isGeneratingAll}
-                  >
-                    {isGeneratingAll
-                      ? `Generating ${generationProgress.current}/${generationProgress.total}`
-                      : `Generate All (${postsNeedingGeneration.length})`}
-                  </Button>
+                {selectedDates.size > 0 ? (
+                  <>
+                    <Button
+                      variant="secondary"
+                      onClick={handleRegenerateSelected}
+                      isLoading={isGeneratingAll}
+                    >
+                      {isGeneratingAll
+                        ? `Regenerating ${generationProgress.current}/${generationProgress.total}`
+                        : `Regenerate (${selectedDates.size})`}
+                    </Button>
+                    <Button
+                      variant="danger"
+                      onClick={() => setShowDeleteModal(true)}
+                    >
+                      Delete ({selectedDates.size})
+                    </Button>
+                  </>
+                ) : (
+                  postsNeedingGeneration.length > 0 && (
+                    <Button
+                      onClick={handleGenerateAll}
+                      isLoading={isGeneratingAll}
+                    >
+                      {isGeneratingAll
+                        ? `Generating ${generationProgress.current}/${generationProgress.total}`
+                        : `Generate All (${postsNeedingGeneration.length})`}
+                    </Button>
+                  )
                 )}
               </div>
             }
@@ -164,6 +291,20 @@ export default function ReviewPage() {
 
           {/* Filters */}
           <div className="mb-6 flex flex-wrap items-center gap-4">
+            {filteredPosts.length > 0 && (
+              <label className="flex cursor-pointer items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={selectedDates.size === filteredPosts.length && filteredPosts.length > 0}
+                  onChange={toggleSelectAll}
+                  className="h-4 w-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+                />
+                <span className="text-sm text-gray-600 dark:text-gray-400">
+                  Select all
+                </span>
+              </label>
+            )}
+
             <div className="flex gap-2">
               {(['all', 'facebook', 'instagram'] as const).map((f) => (
                 <button
@@ -231,6 +372,9 @@ export default function ReviewPage() {
                   key={post.date}
                   post={post}
                   platformFilter={platformFilter}
+                  today={today}
+                  isSelected={selectedDates.has(post.date)}
+                  onToggleSelect={() => toggleSelect(post.date)}
                 />
               ))}
             </div>
@@ -243,6 +387,34 @@ export default function ReviewPage() {
             </div>
           )}
         </main>
+
+        {/* Delete Confirmation Modal */}
+        <Modal
+          isOpen={showDeleteModal}
+          onClose={() => setShowDeleteModal(false)}
+          title="Delete Posts"
+          size="sm"
+        >
+          <p className="text-gray-600 dark:text-gray-400">
+            Are you sure you want to delete {selectedDates.size} post(s)? This
+            action cannot be undone.
+          </p>
+          <ModalFooter>
+            <Button
+              variant="secondary"
+              onClick={() => setShowDeleteModal(false)}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="danger"
+              onClick={handleDeleteSelected}
+              isLoading={isDeleting}
+            >
+              Delete
+            </Button>
+          </ModalFooter>
+        </Modal>
       </div>
     </AuthGuard>
   );
@@ -251,15 +423,55 @@ export default function ReviewPage() {
 interface PostCardProps {
   post: Post;
   platformFilter: PlatformFilter;
+  today: string;
+  isSelected: boolean;
+  onToggleSelect: () => void;
 }
 
-function PostCard({ post, platformFilter }: PostCardProps) {
+function PostCard({ post, platformFilter, today, isSelected, onToggleSelect }: PostCardProps) {
   const { user } = useAuth();
   const { workspace } = useWorkspace();
   const [isGenerating, setIsGenerating] = useState(false);
+  const [isEditingDate, setIsEditingDate] = useState(false);
+  const [newDate, setNewDate] = useState(post.date);
+  const [isChangingDate, setIsChangingDate] = useState(false);
 
   const date = new Date(post.date + 'T00:00:00');
   const imageUrl = post.imageUrl || undefined;
+
+  const handleDateChange = async () => {
+    if (!user || newDate === post.date) {
+      setIsEditingDate(false);
+      return;
+    }
+
+    setIsChangingDate(true);
+    try {
+      const result = await changePostDate(user.uid, post.date, newDate);
+      if (result.success) {
+        toast.success('Date updated');
+        setIsEditingDate(false);
+      } else {
+        toast.error(result.error || 'Failed to change date');
+        setNewDate(post.date);
+      }
+    } catch (error) {
+      console.error('Error changing date:', error);
+      toast.error('Failed to change date');
+      setNewDate(post.date);
+    } finally {
+      setIsChangingDate(false);
+    }
+  };
+
+  const handleDateKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter') {
+      handleDateChange();
+    } else if (e.key === 'Escape') {
+      setNewDate(post.date);
+      setIsEditingDate(false);
+    }
+  };
 
   const handleGenerate = async () => {
     if (!user || !workspace) return;
@@ -310,18 +522,45 @@ function PostCard({ post, platformFilter }: PostCardProps) {
 
   return (
     <Card padding="none">
-      <div className="flex flex-col lg:flex-row">
+      <div className={`flex flex-col lg:flex-row ${isSelected ? 'ring-2 ring-primary-500 ring-inset' : ''}`}>
         {/* Left column - Image and date */}
         <div className="flex-shrink-0 border-b border-gray-200 p-4 lg:w-64 lg:border-b-0 lg:border-r dark:border-gray-700">
           <div className="mb-3 flex items-center justify-between">
-            <div>
-              <p className="text-lg font-semibold text-gray-900 dark:text-white">
-                {date.toLocaleDateString('en-US', {
-                  weekday: 'short',
-                  month: 'short',
-                  day: 'numeric',
-                })}
-              </p>
+            <div className="flex items-center gap-3">
+              <input
+                type="checkbox"
+                checked={isSelected}
+                onChange={onToggleSelect}
+                className="h-4 w-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+              />
+              {isEditingDate ? (
+                <div className="flex items-center gap-1">
+                  <input
+                    type="date"
+                    value={newDate}
+                    onChange={(e) => setNewDate(e.target.value)}
+                    onKeyDown={handleDateKeyDown}
+                    onBlur={handleDateChange}
+                    min={today}
+                    disabled={isChangingDate}
+                    autoFocus
+                    className="rounded border border-primary-300 bg-white px-2 py-1 text-sm text-gray-900 focus:border-primary-500 focus:outline-none focus:ring-1 focus:ring-primary-500 dark:border-gray-600 dark:bg-gray-800 dark:text-white"
+                  />
+                  {isChangingDate && <Spinner size="sm" />}
+                </div>
+              ) : (
+                <button
+                  onClick={() => setIsEditingDate(true)}
+                  className="text-lg font-semibold text-gray-900 hover:text-primary-600 dark:text-white dark:hover:text-primary-400"
+                  title="Click to change date"
+                >
+                  {date.toLocaleDateString('en-US', {
+                    weekday: 'short',
+                    month: 'short',
+                    day: 'numeric',
+                  })}
+                </button>
+              )}
               <StatusBadge status={post.status} />
             </div>
             <Button

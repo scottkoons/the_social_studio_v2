@@ -9,7 +9,11 @@ import {
   updatePost,
   updatePostFacebook,
   updatePostInstagram,
+  changePostDate,
+  deletePost,
 } from '@/lib/services';
+import { generateCaptions } from '@/lib/aiGeneration';
+import { Timestamp } from 'firebase/firestore';
 import { formatTime12Hour } from '@/components/ui';
 import {
   PageHeader,
@@ -27,6 +31,7 @@ import {
   HashtagInput,
   Textarea,
 } from '@/components/ui';
+import { clsx } from 'clsx';
 import type { Post } from '@/types';
 
 const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
@@ -36,6 +41,7 @@ const MONTHS = [
 ];
 
 export default function CalendarPage() {
+  const { user } = useAuth();
   const { posts, loading: postsLoading } = usePosts();
 
   // Current month state
@@ -43,6 +49,11 @@ export default function CalendarPage() {
 
   // Selected day for modal
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
+
+  // Drag-and-drop state
+  const [draggedDate, setDraggedDate] = useState<string | null>(null);
+  const [dropTargetDate, setDropTargetDate] = useState<string | null>(null);
+  const [isMoving, setIsMoving] = useState(false);
 
   // Get calendar data for current month
   const calendarData = useMemo(() => {
@@ -117,6 +128,49 @@ export default function CalendarPage() {
   // Get today's date string
   const today = new Date().toISOString().split('T')[0];
 
+  // Drag-and-drop handlers
+  const handleDragStart = useCallback((date: string) => {
+    setDraggedDate(date);
+  }, []);
+
+  const handleDragEnd = useCallback(() => {
+    setDraggedDate(null);
+    setDropTargetDate(null);
+  }, []);
+
+  const handleDragOver = useCallback((date: string) => {
+    setDropTargetDate(date);
+  }, []);
+
+  const handleDragLeave = useCallback(() => {
+    setDropTargetDate(null);
+  }, []);
+
+  const handleDrop = useCallback(async (targetDate: string) => {
+    if (!user || !draggedDate || draggedDate === targetDate) {
+      setDraggedDate(null);
+      setDropTargetDate(null);
+      return;
+    }
+
+    setIsMoving(true);
+    try {
+      const result = await changePostDate(user.uid, draggedDate, targetDate);
+      if (result.success) {
+        toast.success('Post moved successfully');
+      } else {
+        toast.error(result.error || 'Failed to move post');
+      }
+    } catch (error) {
+      console.error('Error moving post:', error);
+      toast.error('Failed to move post');
+    } finally {
+      setIsMoving(false);
+      setDraggedDate(null);
+      setDropTargetDate(null);
+    }
+  }, [user, draggedDate]);
+
   // Get selected post for modal
   const selectedPost = selectedDate ? postsByDate.get(selectedDate) : null;
 
@@ -174,7 +228,7 @@ export default function CalendarPage() {
               <div className="grid grid-cols-7">
                 {calendarData.map((day, index) => {
                   const post = postsByDate.get(day.date);
-                  const isToday = day.date === today;
+                  const isDayToday = day.date === today;
 
                   return (
                     <CalendarDay
@@ -182,10 +236,19 @@ export default function CalendarPage() {
                       date={day.date}
                       dayNumber={day.dayNumber}
                       isCurrentMonth={day.isCurrentMonth}
-                      isToday={isToday}
+                      isToday={isDayToday}
                       post={post}
                       onClick={() => day.isCurrentMonth && setSelectedDate(day.date)}
                       isLastRow={index >= 35}
+                      today={today}
+                      isDragging={draggedDate === day.date}
+                      isDropTarget={dropTargetDate === day.date}
+                      isMoving={isMoving}
+                      onDragStart={handleDragStart}
+                      onDragEnd={handleDragEnd}
+                      onDragOver={handleDragOver}
+                      onDragLeave={handleDragLeave}
+                      onDrop={handleDrop}
                     />
                   );
                 })}
@@ -194,7 +257,7 @@ export default function CalendarPage() {
           )}
 
           {/* Legend */}
-          <div className="mt-4 flex flex-wrap gap-4 text-sm text-gray-500 dark:text-gray-400">
+          <div className="mt-4 flex flex-wrap items-center gap-4 text-sm text-gray-500 dark:text-gray-400">
             <div className="flex items-center gap-2">
               <div className="h-3 w-3 rounded-full bg-facebook" />
               <span>Facebook</span>
@@ -206,6 +269,9 @@ export default function CalendarPage() {
             <div className="flex items-center gap-2">
               <div className="h-3 w-3 rounded border border-primary-500 bg-primary-100 dark:bg-primary-900/30" />
               <span>Today</span>
+            </div>
+            <div className="ml-auto text-xs">
+              <span className="text-gray-400">Tip:</span> Drag posts to reschedule
             </div>
           </div>
         </main>
@@ -231,6 +297,15 @@ interface CalendarDayProps {
   post?: Post;
   onClick: () => void;
   isLastRow: boolean;
+  today: string;
+  isDragging: boolean;
+  isDropTarget: boolean;
+  isMoving: boolean;
+  onDragStart: (date: string) => void;
+  onDragEnd: () => void;
+  onDragOver: (date: string) => void;
+  onDragLeave: () => void;
+  onDrop: (targetDate: string) => void;
 }
 
 function CalendarDay({
@@ -241,21 +316,67 @@ function CalendarDay({
   post,
   onClick,
   isLastRow,
+  today,
+  isDragging,
+  isDropTarget,
+  isMoving,
+  onDragStart,
+  onDragEnd,
+  onDragOver,
+  onDragLeave,
+  onDrop,
 }: CalendarDayProps) {
   const hasContent = post && (post.imageUrl || post.starterText);
   const hasGenerated = post && (post.facebook || post.instagram);
+  const canDrag = isCurrentMonth && post && !isMoving;
+  const canDrop = isCurrentMonth && date >= today && !post && !isMoving;
+
+  const handleDragStart = (e: React.DragEvent) => {
+    if (!canDrag) {
+      e.preventDefault();
+      return;
+    }
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', date);
+    onDragStart(date);
+  };
+
+  const handleDragOver = (e: React.DragEvent) => {
+    if (!canDrop) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    onDragOver(date);
+  };
+
+  const handleDragLeave = (e: React.DragEvent) => {
+    e.preventDefault();
+    onDragLeave();
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    if (!canDrop) return;
+    onDrop(date);
+  };
 
   return (
-    <button
-      onClick={onClick}
-      disabled={!isCurrentMonth}
-      className={`
-        relative flex min-h-[100px] flex-col border-b border-r border-gray-200 p-1.5 text-left transition-colors
-        dark:border-gray-700
-        ${isCurrentMonth ? 'hover:bg-gray-50 dark:hover:bg-gray-800/50' : 'cursor-default'}
-        ${!isLastRow ? '' : 'border-b-0'}
-        ${isToday ? 'bg-primary-50 dark:bg-primary-900/20' : ''}
-      `}
+    <div
+      draggable={canDrag}
+      onDragStart={handleDragStart}
+      onDragEnd={onDragEnd}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+      onClick={isCurrentMonth && !isMoving ? onClick : undefined}
+      className={clsx(
+        'relative flex min-h-[100px] flex-col border-b border-r border-gray-200 p-1.5 text-left transition-colors dark:border-gray-700',
+        isCurrentMonth && !isMoving ? 'cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800/50' : 'cursor-default',
+        !isLastRow ? '' : 'border-b-0',
+        isToday && 'bg-primary-50 dark:bg-primary-900/20',
+        isDragging && 'opacity-50 ring-2 ring-primary-500 ring-inset',
+        isDropTarget && canDrop && 'bg-primary-100 dark:bg-primary-900/40 ring-2 ring-primary-400 ring-inset',
+        canDrag && 'cursor-grab active:cursor-grabbing'
+      )}
     >
       {/* Day Number */}
       <div
@@ -316,7 +437,7 @@ function CalendarDay({
           )}
         </div>
       )}
-    </button>
+    </div>
   );
 }
 
@@ -328,6 +449,11 @@ interface DayEditModalProps {
 
 function DayEditModal({ date, post, onClose }: DayEditModalProps) {
   const { user } = useAuth();
+  const { workspace } = useWorkspace();
+  const [isRegenerating, setIsRegenerating] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+
   const dateObj = new Date(date + 'T00:00:00');
   const formattedDate = dateObj.toLocaleDateString('en-US', {
     weekday: 'long',
@@ -335,6 +461,62 @@ function DayEditModal({ date, post, onClose }: DayEditModalProps) {
     day: 'numeric',
     year: 'numeric',
   });
+
+  const handleRegenerate = async () => {
+    if (!user || !workspace || !post?.starterText.trim()) {
+      toast.error('No starter text to regenerate from');
+      return;
+    }
+
+    setIsRegenerating(true);
+    try {
+      const result = await generateCaptions(post.starterText, workspace.settings.ai);
+
+      await updatePost(user.uid, post.date, {
+        facebook: {
+          caption: result.facebook.caption,
+          hashtags: result.facebook.hashtags,
+          scheduledTime: post.facebook?.scheduledTime || '12:00',
+          timeSource: 'ai' as const,
+        },
+        instagram: {
+          caption: result.instagram.caption,
+          hashtags: result.instagram.hashtags,
+          scheduledTime: post.instagram?.scheduledTime || '19:00',
+          timeSource: 'ai' as const,
+        },
+        status: 'generated',
+        aiMeta: {
+          model: result.model,
+          generatedAt: Timestamp.now(),
+          confidence: result.confidence,
+        },
+      });
+
+      toast.success('Captions regenerated');
+    } catch (error) {
+      console.error('Error regenerating:', error);
+      toast.error('Failed to regenerate captions');
+    } finally {
+      setIsRegenerating(false);
+    }
+  };
+
+  const handleDelete = async () => {
+    if (!user || !post) return;
+
+    setIsDeleting(true);
+    try {
+      await deletePost(user.uid, post.date);
+      toast.success('Post deleted');
+      onClose();
+    } catch (error) {
+      console.error('Error deleting:', error);
+      toast.error('Failed to delete post');
+    } finally {
+      setIsDeleting(false);
+    }
+  };
 
   if (!post) {
     return (
@@ -351,6 +533,24 @@ function DayEditModal({ date, post, onClose }: DayEditModalProps) {
         <ModalFooter>
           <Button variant="secondary" onClick={onClose}>
             Close
+          </Button>
+        </ModalFooter>
+      </Modal>
+    );
+  }
+
+  if (showDeleteConfirm) {
+    return (
+      <Modal isOpen onClose={() => setShowDeleteConfirm(false)} title="Delete Post" size="sm">
+        <p className="text-gray-600 dark:text-gray-400">
+          Are you sure you want to delete this post? This action cannot be undone.
+        </p>
+        <ModalFooter>
+          <Button variant="secondary" onClick={() => setShowDeleteConfirm(false)}>
+            Cancel
+          </Button>
+          <Button variant="danger" onClick={handleDelete} isLoading={isDeleting}>
+            Delete
           </Button>
         </ModalFooter>
       </Modal>
@@ -406,9 +606,27 @@ function DayEditModal({ date, post, onClose }: DayEditModalProps) {
       </div>
 
       <ModalFooter>
-        <Button variant="secondary" onClick={onClose}>
-          Close
-        </Button>
+        <div className="flex w-full justify-between">
+          <Button
+            variant="danger"
+            onClick={() => setShowDeleteConfirm(true)}
+          >
+            Delete
+          </Button>
+          <div className="flex gap-3">
+            <Button
+              variant="secondary"
+              onClick={handleRegenerate}
+              isLoading={isRegenerating}
+              disabled={!post.starterText?.trim()}
+            >
+              Regenerate
+            </Button>
+            <Button variant="secondary" onClick={onClose}>
+              Close
+            </Button>
+          </div>
+        </div>
       </ModalFooter>
     </Modal>
   );

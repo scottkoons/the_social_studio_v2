@@ -3,8 +3,10 @@
 import { useState, useCallback, useMemo } from 'react';
 import { AuthGuard, Navbar } from '@/components/layout';
 import { useAuth } from '@/contexts/AuthContext';
-import { usePosts } from '@/hooks';
-import { createPostsBatch, getPostsByDateRange } from '@/lib/services';
+import { usePosts, useWorkspace } from '@/hooks';
+import { createPostsBatch, getPostsByDateRange, updatePost } from '@/lib/services';
+import { generateCaptions } from '@/lib/aiGeneration';
+import { Timestamp } from 'firebase/firestore';
 import {
   generateSchedule,
   validateDateRange,
@@ -42,15 +44,21 @@ type TabType = 'schedule' | 'csv';
 export default function PlanningPage() {
   const { user } = useAuth();
   const { posts } = usePosts();
+  const { workspace } = useWorkspace();
 
   // Tab state
   const [activeTab, setActiveTab] = useState<TabType>('schedule');
+
+  // AI generation progress state
+  const [isGeneratingCaptions, setIsGeneratingCaptions] = useState(false);
+  const [generationProgress, setGenerationProgress] = useState({ current: 0, total: 0 });
 
   // Schedule generator state
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
   const [postsPerWeek, setPostsPerWeek] = useState(7);
   const [generatedSchedule, setGeneratedSchedule] = useState<ScheduledPost[]>([]);
+  const [selectedScheduleDates, setSelectedScheduleDates] = useState<Set<string>>(new Set());
   const [isGenerating, setIsGenerating] = useState(false);
   const [isApplying, setIsApplying] = useState(false);
 
@@ -64,6 +72,7 @@ export default function PlanningPage() {
   const [csvStartDate, setCsvStartDate] = useState('');
   const [csvEndDate, setCsvEndDate] = useState('');
   const [schedulingResult, setSchedulingResult] = useState<SchedulingResult | null>(null);
+  const [selectedCsvRows, setSelectedCsvRows] = useState<Set<number>>(new Set());
   const [isScheduling, setIsScheduling] = useState(false);
   const [showIssuesModal, setShowIssuesModal] = useState(false);
 
@@ -115,6 +124,8 @@ export default function PlanningPage() {
       });
 
       setGeneratedSchedule(schedule);
+      // Auto-select all generated dates
+      setSelectedScheduleDates(new Set(schedule.map((s) => s.date)));
       setIsGenerating(false);
 
       if (schedule.length === 0) {
@@ -123,14 +134,41 @@ export default function PlanningPage() {
     }, 300);
   }, [startDate, endDate, postsPerWeek, existingPostDates, dateValidation.valid]);
 
+  // Toggle schedule date selection
+  const toggleScheduleDate = useCallback((date: string) => {
+    setSelectedScheduleDates((prev) => {
+      const next = new Set(prev);
+      if (next.has(date)) {
+        next.delete(date);
+      } else {
+        next.add(date);
+      }
+      return next;
+    });
+  }, []);
+
+  // Toggle all schedule dates
+  const toggleAllScheduleDates = useCallback(() => {
+    if (selectedScheduleDates.size === generatedSchedule.length) {
+      setSelectedScheduleDates(new Set());
+    } else {
+      setSelectedScheduleDates(new Set(generatedSchedule.map((s) => s.date)));
+    }
+  }, [generatedSchedule, selectedScheduleDates.size]);
+
   // Apply schedule (create posts)
   const handleApplySchedule = useCallback(async () => {
-    if (!user || generatedSchedule.length === 0) return;
+    if (!user || selectedScheduleDates.size === 0) return;
 
     setIsApplying(true);
 
     try {
-      const postsToCreate = generatedSchedule.map((item) => ({
+      // Only create posts for selected dates
+      const selectedPosts = generatedSchedule.filter((item) =>
+        selectedScheduleDates.has(item.date)
+      );
+
+      const postsToCreate = selectedPosts.map((item) => ({
         date: item.date,
         starterText: '',
         facebook: {
@@ -149,8 +187,9 @@ export default function PlanningPage() {
 
       await createPostsBatch(user.uid, postsToCreate);
 
-      toast.success(`Created ${generatedSchedule.length} posts`);
+      toast.success(`Created ${postsToCreate.length} posts`);
       setGeneratedSchedule([]);
+      setSelectedScheduleDates(new Set());
       setStartDate('');
       setEndDate('');
     } catch (error) {
@@ -159,7 +198,7 @@ export default function PlanningPage() {
     } finally {
       setIsApplying(false);
     }
-  }, [user, generatedSchedule]);
+  }, [user, generatedSchedule, selectedScheduleDates]);
 
   // Handle CSV file selection
   const handleCsvFileSelect = useCallback(async (file: File) => {
@@ -249,6 +288,8 @@ export default function PlanningPage() {
       // Run the scheduling algorithm
       const result = assignDatesWithAnchors(csvRows, allDates, occupiedDates);
       setSchedulingResult(result);
+      // Auto-select all scheduled rows
+      setSelectedCsvRows(new Set(result.scheduledRows.map((r) => r.rowIndex)));
 
       if (!result.canProceed) {
         setShowIssuesModal(true);
@@ -267,20 +308,48 @@ export default function PlanningPage() {
     }
   }, [csvDateValidation.valid, csvRows, csvStartDate, csvEndDate, user]);
 
+  // Toggle CSV row selection
+  const toggleCsvRow = useCallback((rowIndex: number) => {
+    setSelectedCsvRows((prev) => {
+      const next = new Set(prev);
+      if (next.has(rowIndex)) {
+        next.delete(rowIndex);
+      } else {
+        next.add(rowIndex);
+      }
+      return next;
+    });
+  }, []);
+
+  // Toggle all CSV rows
+  const toggleAllCsvRows = useCallback(() => {
+    if (!schedulingResult) return;
+    if (selectedCsvRows.size === schedulingResult.scheduledRows.length) {
+      setSelectedCsvRows(new Set());
+    } else {
+      setSelectedCsvRows(new Set(schedulingResult.scheduledRows.map((r) => r.rowIndex)));
+    }
+  }, [schedulingResult, selectedCsvRows.size]);
+
   // Apply CSV import
   const handleApplyCsv = useCallback(async () => {
     if (!user || !schedulingResult || !schedulingResult.canProceed) return;
 
-    if (schedulingResult.scheduledRows.length === 0) {
-      toast.error('No rows to import');
+    if (selectedCsvRows.size === 0) {
+      toast.error('No rows selected');
       return;
     }
 
     setIsApplying(true);
 
     try {
+      // Only import selected rows
+      const selectedRows = schedulingResult.scheduledRows.filter((row) =>
+        selectedCsvRows.has(row.rowIndex)
+      );
+
       // Build posts array with assigned dates and platform-specific times
-      const postsToCreate = schedulingResult.scheduledRows.map((row) => {
+      const postsToCreate = selectedRows.map((row) => {
         const date = new Date(row.finalDate + 'T00:00:00');
         const dayOfWeek = date.getDay();
 
@@ -306,12 +375,60 @@ export default function PlanningPage() {
       await createPostsBatch(user.uid, postsToCreate);
 
       toast.success(`Imported ${postsToCreate.length} posts`);
+
+      // Now generate captions for posts with starter text
+      const postsWithText = postsToCreate.filter((p) => p.starterText.trim());
+
+      if (postsWithText.length > 0 && workspace) {
+        setIsGeneratingCaptions(true);
+        setGenerationProgress({ current: 0, total: postsWithText.length });
+
+        toast.success(`Generating AI captions for ${postsWithText.length} posts...`);
+
+        for (let i = 0; i < postsWithText.length; i++) {
+          const post = postsWithText[i];
+          setGenerationProgress({ current: i + 1, total: postsWithText.length });
+
+          try {
+            const result = await generateCaptions(post.starterText, workspace.settings.ai);
+
+            await updatePost(user.uid, post.date, {
+              facebook: {
+                caption: result.facebook.caption,
+                hashtags: result.facebook.hashtags,
+                scheduledTime: post.facebook.scheduledTime,
+                timeSource: 'ai' as const,
+              },
+              instagram: {
+                caption: result.instagram.caption,
+                hashtags: result.instagram.hashtags,
+                scheduledTime: post.instagram.scheduledTime,
+                timeSource: 'ai' as const,
+              },
+              status: 'generated',
+              aiMeta: {
+                model: result.model,
+                generatedAt: Timestamp.now(),
+                confidence: result.confidence,
+              },
+            });
+          } catch (error) {
+            console.error(`Error generating captions for ${post.date}:`, error);
+            // Continue with other posts even if one fails
+          }
+        }
+
+        setIsGeneratingCaptions(false);
+        toast.success(`Generated captions for ${postsWithText.length} posts`);
+      }
+
       setCsvFile(null);
       setCsvRows([]);
       setCsvParseErrors([]);
       setCsvStartDate('');
       setCsvEndDate('');
       setSchedulingResult(null);
+      setSelectedCsvRows(new Set());
       setShowIssuesModal(false);
     } catch (error) {
       console.error('Error importing CSV:', error);
@@ -319,8 +436,9 @@ export default function PlanningPage() {
       toast.error(message);
     } finally {
       setIsApplying(false);
+      setIsGeneratingCaptions(false);
     }
-  }, [user, schedulingResult]);
+  }, [user, schedulingResult, selectedCsvRows, workspace]);
 
   return (
     <AuthGuard>
@@ -431,6 +549,14 @@ export default function PlanningPage() {
                       <table className="w-full">
                         <thead className="sticky top-0 bg-white dark:bg-gray-800">
                           <tr className="border-b border-gray-200 text-left text-sm font-medium text-gray-500 dark:border-gray-700 dark:text-gray-400">
+                            <th className="pb-3 pr-2">
+                              <input
+                                type="checkbox"
+                                checked={selectedScheduleDates.size === generatedSchedule.length && generatedSchedule.length > 0}
+                                onChange={toggleAllScheduleDates}
+                                className="h-4 w-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+                              />
+                            </th>
                             <th className="pb-3 pr-4">Date</th>
                             <th className="pb-3 pr-4">Day</th>
                             <th className="pb-3 pr-4">
@@ -451,8 +577,18 @@ export default function PlanningPage() {
                           {generatedSchedule.map((item) => (
                             <tr
                               key={item.date}
-                              className="border-b border-gray-100 text-sm dark:border-gray-700/50"
+                              className={`border-b border-gray-100 text-sm dark:border-gray-700/50 ${
+                                selectedScheduleDates.has(item.date) ? '' : 'opacity-50'
+                              }`}
                             >
+                              <td className="py-3 pr-2">
+                                <input
+                                  type="checkbox"
+                                  checked={selectedScheduleDates.has(item.date)}
+                                  onChange={() => toggleScheduleDate(item.date)}
+                                  className="h-4 w-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+                                />
+                              </td>
                               <td className="py-3 pr-4 font-medium text-gray-900 dark:text-white">
                                 {formatDateShort(item.date)}
                               </td>
@@ -474,7 +610,10 @@ export default function PlanningPage() {
                     <div className="flex gap-3 pt-4">
                       <Button
                         variant="secondary"
-                        onClick={() => setGeneratedSchedule([])}
+                        onClick={() => {
+                          setGeneratedSchedule([]);
+                          setSelectedScheduleDates(new Set());
+                        }}
                         className="flex-1"
                       >
                         Clear
@@ -482,9 +621,10 @@ export default function PlanningPage() {
                       <Button
                         onClick={handleApplySchedule}
                         isLoading={isApplying}
+                        disabled={selectedScheduleDates.size === 0}
                         className="flex-1"
                       >
-                        Apply Schedule
+                        Apply ({selectedScheduleDates.size})
                       </Button>
                     </div>
                   </div>
@@ -692,6 +832,14 @@ export default function PlanningPage() {
                       <table className="w-full">
                         <thead className="sticky top-0 bg-white dark:bg-gray-800">
                           <tr className="border-b border-gray-200 text-left text-sm font-medium text-gray-500 dark:border-gray-700 dark:text-gray-400">
+                            <th className="pb-3 pr-2">
+                              <input
+                                type="checkbox"
+                                checked={selectedCsvRows.size === schedulingResult.scheduledRows.length && schedulingResult.scheduledRows.length > 0}
+                                onChange={toggleAllCsvRows}
+                                className="h-4 w-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+                              />
+                            </th>
                             <th className="pb-3 pr-4">#</th>
                             <th className="pb-3 pr-4">Date</th>
                             <th className="pb-3 pr-4">Text</th>
@@ -702,8 +850,18 @@ export default function PlanningPage() {
                           {schedulingResult.scheduledRows.slice(0, 15).map((row) => (
                             <tr
                               key={row.rowIndex}
-                              className="border-b border-gray-100 text-sm dark:border-gray-700/50"
+                              className={`border-b border-gray-100 text-sm dark:border-gray-700/50 ${
+                                selectedCsvRows.has(row.rowIndex) ? '' : 'opacity-50'
+                              }`}
                             >
+                              <td className="py-2 pr-2">
+                                <input
+                                  type="checkbox"
+                                  checked={selectedCsvRows.has(row.rowIndex)}
+                                  onChange={() => toggleCsvRow(row.rowIndex)}
+                                  className="h-4 w-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+                                />
+                              </td>
                               <td className="py-2 pr-4 text-gray-500">
                                 {row.rowIndex}
                               </td>
@@ -767,11 +925,13 @@ export default function PlanningPage() {
                       </Button>
                       <Button
                         onClick={handleApplyCsv}
-                        isLoading={isApplying}
-                        disabled={!schedulingResult.canProceed || schedulingResult.scheduledRows.length === 0}
+                        isLoading={isApplying || isGeneratingCaptions}
+                        disabled={!schedulingResult.canProceed || selectedCsvRows.size === 0}
                         className="flex-1"
                       >
-                        Import {schedulingResult.scheduledRows.length} Posts
+                        {isGeneratingCaptions
+                          ? `Generating ${generationProgress.current}/${generationProgress.total}`
+                          : `Import (${selectedCsvRows.size})`}
                       </Button>
                     </div>
                   </div>

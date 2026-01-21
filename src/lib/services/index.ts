@@ -16,7 +16,9 @@ export {
   deletePostsBatch,
   postExists,
   getExistingPostDates,
+  changePostDate,
 } from './posts';
+export type { ChangeDateResult } from './posts';
 
 // Asset operations
 export {

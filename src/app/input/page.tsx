@@ -3,14 +3,18 @@
 import { useState, useCallback, useMemo } from 'react';
 import { AuthGuard, Navbar } from '@/components/layout';
 import { useAuth } from '@/contexts/AuthContext';
-import { usePosts, useAssetUpload, useDebouncedCallback } from '@/hooks';
+import { usePosts, useAssetUpload, useDebouncedCallback, useWorkspace } from '@/hooks';
 import {
   createPost,
   updatePostStarterText,
   updatePostImage,
+  updatePost,
   deletePost,
   deletePostsBatch,
+  changePostDate,
 } from '@/lib/services';
+import { generateCaptions } from '@/lib/aiGeneration';
+import { Timestamp } from 'firebase/firestore';
 import { ImageUpload } from '@/components/ImageUpload';
 import {
   PageHeader,
@@ -34,6 +38,7 @@ type FilterType = 'all' | 'has-content' | 'missing-content';
 export default function InputPage() {
   const { user } = useAuth();
   const { posts, loading: postsLoading } = usePosts();
+  const { workspace } = useWorkspace();
   const { uploadImage } = useAssetUpload();
 
   // Filter state
@@ -51,6 +56,10 @@ export default function InputPage() {
   // Delete confirmation modal
   const [showDeleteModal, setShowDeleteModal] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
+
+  // Bulk regeneration state
+  const [isRegenerating, setIsRegenerating] = useState(false);
+  const [regenProgress, setRegenProgress] = useState({ current: 0, total: 0 });
 
   // Get today's date
   const today = new Date().toISOString().split('T')[0];
@@ -149,6 +158,62 @@ export default function InputPage() {
     }
   }, [user, selectedDates]);
 
+  // Bulk regenerate handler
+  const handleRegenerateSelected = useCallback(async () => {
+    if (!user || !workspace || selectedDates.size === 0) return;
+
+    const selectedPosts = posts.filter(
+      (p) => selectedDates.has(p.date) && p.starterText.trim()
+    );
+
+    if (selectedPosts.length === 0) {
+      toast.error('No posts with starter text to regenerate');
+      return;
+    }
+
+    setIsRegenerating(true);
+    setRegenProgress({ current: 0, total: selectedPosts.length });
+
+    try {
+      for (let i = 0; i < selectedPosts.length; i++) {
+        const post = selectedPosts[i];
+        setRegenProgress({ current: i + 1, total: selectedPosts.length });
+
+        const result = await generateCaptions(post.starterText, workspace.settings.ai);
+
+        await updatePost(user.uid, post.date, {
+          facebook: {
+            caption: result.facebook.caption,
+            hashtags: result.facebook.hashtags,
+            scheduledTime: post.facebook?.scheduledTime || '12:00',
+            timeSource: 'ai' as const,
+          },
+          instagram: {
+            caption: result.instagram.caption,
+            hashtags: result.instagram.hashtags,
+            scheduledTime: post.instagram?.scheduledTime || '19:00',
+            timeSource: 'ai' as const,
+          },
+          status: 'generated',
+          aiMeta: {
+            model: result.model,
+            generatedAt: Timestamp.now(),
+            confidence: result.confidence,
+          },
+        });
+      }
+
+      toast.success(`Regenerated ${selectedPosts.length} post(s)`);
+      setSelectedDates(new Set());
+    } catch (error) {
+      console.error('Error regenerating:', error);
+      toast.error('Failed to regenerate some posts');
+    } finally {
+      setIsRegenerating(false);
+      setRegenProgress({ current: 0, total: 0 });
+    }
+  }, [user, workspace, selectedDates, posts]);
+
   return (
     <AuthGuard>
       <div className="min-h-screen bg-gray-50 dark:bg-gray-900">
@@ -160,12 +225,23 @@ export default function InputPage() {
             actions={
               <div className="flex gap-3">
                 {selectedDates.size > 0 && (
-                  <Button
-                    variant="danger"
-                    onClick={() => setShowDeleteModal(true)}
-                  >
-                    Delete ({selectedDates.size})
-                  </Button>
+                  <>
+                    <Button
+                      variant="secondary"
+                      onClick={handleRegenerateSelected}
+                      isLoading={isRegenerating}
+                    >
+                      {isRegenerating
+                        ? `Regenerating ${regenProgress.current}/${regenProgress.total}`
+                        : `Regenerate (${selectedDates.size})`}
+                    </Button>
+                    <Button
+                      variant="danger"
+                      onClick={() => setShowDeleteModal(true)}
+                    >
+                      Delete ({selectedDates.size})
+                    </Button>
+                  </>
                 )}
                 <Button onClick={() => setShowAddModal(true)}>Add Post</Button>
               </div>
@@ -259,6 +335,7 @@ export default function InputPage() {
                         isSelected={selectedDates.has(post.date)}
                         onToggleSelect={() => toggleSelect(post.date)}
                         onUploadImage={uploadImage}
+                        today={today}
                       />
                     ))}
                   </tbody>
@@ -341,6 +418,7 @@ interface PostRowProps {
   isSelected: boolean;
   onToggleSelect: () => void;
   onUploadImage: (file: File, postDate: string) => Promise<any>;
+  today: string;
 }
 
 function PostRow({
@@ -348,10 +426,52 @@ function PostRow({
   isSelected,
   onToggleSelect,
   onUploadImage,
+  today,
 }: PostRowProps) {
   const { user } = useAuth();
+  const { workspace } = useWorkspace();
   const [starterText, setStarterText] = useState(post.starterText);
   const [isSaving, setIsSaving] = useState(false);
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [isEditingDate, setIsEditingDate] = useState(false);
+  const [newDate, setNewDate] = useState(post.date);
+  const [isChangingDate, setIsChangingDate] = useState(false);
+
+  // Auto-generate captions after saving starter text
+  const triggerGeneration = useCallback(async (text: string) => {
+    if (!user || !workspace || !text.trim()) return;
+
+    setIsGenerating(true);
+    try {
+      const result = await generateCaptions(text, workspace.settings.ai);
+
+      await updatePost(user.uid, post.date, {
+        facebook: {
+          caption: result.facebook.caption,
+          hashtags: result.facebook.hashtags,
+          scheduledTime: post.facebook?.scheduledTime || '12:00',
+          timeSource: post.facebook?.timeSource || 'ai',
+        },
+        instagram: {
+          caption: result.instagram.caption,
+          hashtags: result.instagram.hashtags,
+          scheduledTime: post.instagram?.scheduledTime || '19:00',
+          timeSource: post.instagram?.timeSource || 'ai',
+        },
+        status: 'generated',
+        aiMeta: {
+          model: result.model,
+          generatedAt: Timestamp.now(),
+          confidence: result.confidence,
+        },
+      });
+    } catch (error) {
+      console.error('Error generating captions:', error);
+      // Don't show error toast - generation is automatic, user can manually regenerate in Review
+    } finally {
+      setIsGenerating(false);
+    }
+  }, [user, workspace, post.date, post.facebook, post.instagram]);
 
   // Debounced save for starter text
   const [debouncedSave] = useDebouncedCallback(
@@ -361,6 +481,8 @@ function PostRow({
       setIsSaving(true);
       try {
         await updatePostStarterText(user.uid, post.date, text);
+        // Trigger auto-generation after saving
+        triggerGeneration(text);
       } catch (error) {
         console.error('Error saving:', error);
         toast.error('Failed to save');
@@ -381,9 +503,48 @@ function PostRow({
     await onUploadImage(file, post.date);
   };
 
+  const handleImageUrlSubmit = async (url: string) => {
+    if (!user) return;
+    await updatePostImage(user.uid, post.date, undefined, url);
+  };
+
   const handleImageRemove = async () => {
     if (!user) return;
     await updatePostImage(user.uid, post.date, undefined, undefined);
+  };
+
+  const handleDateChange = async () => {
+    if (!user || newDate === post.date) {
+      setIsEditingDate(false);
+      return;
+    }
+
+    setIsChangingDate(true);
+    try {
+      const result = await changePostDate(user.uid, post.date, newDate);
+      if (result.success) {
+        toast.success('Date updated');
+        setIsEditingDate(false);
+      } else {
+        toast.error(result.error || 'Failed to change date');
+        setNewDate(post.date); // Reset to original
+      }
+    } catch (error) {
+      console.error('Error changing date:', error);
+      toast.error('Failed to change date');
+      setNewDate(post.date);
+    } finally {
+      setIsChangingDate(false);
+    }
+  };
+
+  const handleDateKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter') {
+      handleDateChange();
+    } else if (e.key === 'Escape') {
+      setNewDate(post.date);
+      setIsEditingDate(false);
+    }
   };
 
   const imageUrl = post.imageUrl || undefined;
@@ -400,12 +561,33 @@ function PostRow({
         />
       </td>
       <td className="px-4 py-3">
-        <span className="font-medium text-gray-900 dark:text-white">
-          {date.toLocaleDateString('en-US', {
-            month: 'short',
-            day: 'numeric',
-          })}
-        </span>
+        {isEditingDate ? (
+          <div className="flex items-center gap-1">
+            <input
+              type="date"
+              value={newDate}
+              onChange={(e) => setNewDate(e.target.value)}
+              onKeyDown={handleDateKeyDown}
+              onBlur={handleDateChange}
+              min={today}
+              disabled={isChangingDate}
+              autoFocus
+              className="rounded border border-primary-300 bg-white px-2 py-1 text-sm text-gray-900 focus:border-primary-500 focus:outline-none focus:ring-1 focus:ring-primary-500 dark:border-gray-600 dark:bg-gray-800 dark:text-white"
+            />
+            {isChangingDate && <Spinner size="sm" />}
+          </div>
+        ) : (
+          <button
+            onClick={() => setIsEditingDate(true)}
+            className="font-medium text-gray-900 hover:text-primary-600 dark:text-white dark:hover:text-primary-400"
+            title="Click to change date"
+          >
+            {date.toLocaleDateString('en-US', {
+              month: 'short',
+              day: 'numeric',
+            })}
+          </button>
+        )}
       </td>
       <td className="px-4 py-3 text-gray-600 dark:text-gray-400">
         {date.toLocaleDateString('en-US', { weekday: 'short' })}
@@ -414,6 +596,7 @@ function PostRow({
         <ImageUpload
           imageUrl={imageUrl}
           onUpload={handleImageUpload}
+          onUrlSubmit={handleImageUrlSubmit}
           onRemove={handleImageRemove}
           compact
         />
@@ -427,9 +610,12 @@ function PostRow({
             rows={2}
             className="w-full min-w-[200px] max-w-md resize-none rounded-lg border border-gray-200 bg-transparent px-3 py-2 text-sm text-gray-900 placeholder-gray-400 focus:border-primary-500 focus:outline-none focus:ring-1 focus:ring-primary-500 dark:border-gray-700 dark:text-white dark:placeholder-gray-500"
           />
-          {isSaving && (
-            <div className="absolute right-2 top-2">
+          {(isSaving || isGenerating) && (
+            <div className="absolute right-2 top-2 flex items-center gap-1">
               <Spinner size="sm" />
+              {isGenerating && (
+                <span className="text-xs text-gray-400">AI</span>
+              )}
             </div>
           )}
         </div>

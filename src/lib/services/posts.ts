@@ -319,6 +319,86 @@ export async function postExists(workspaceId: string, date: string): Promise<boo
   return snapshot.exists();
 }
 
+// Change a post's date with validation
+export interface ChangeDateResult {
+  success: boolean;
+  error?: string;
+}
+
+export async function changePostDate(
+  workspaceId: string,
+  oldDate: string,
+  newDate: string
+): Promise<ChangeDateResult> {
+  if (!isValidWorkspaceId(workspaceId)) {
+    return { success: false, error: 'Invalid workspace' };
+  }
+  if (!isValidDateString(oldDate) || !isValidDateString(newDate)) {
+    return { success: false, error: 'Invalid date format' };
+  }
+  if (oldDate === newDate) {
+    return { success: true }; // No change needed
+  }
+
+  // Validate new date is not in the past
+  const today = new Date().toISOString().split('T')[0];
+  if (newDate < today) {
+    return { success: false, error: 'Cannot schedule posts in the past' };
+  }
+
+  // Get the existing post
+  const existingPost = await getPost(workspaceId, oldDate);
+  if (!existingPost) {
+    return { success: false, error: 'Post not found' };
+  }
+
+  // Check for platform conflicts on the target date
+  const targetPost = await getPost(workspaceId, newDate);
+  if (targetPost) {
+    // Check if there's a platform conflict
+    const sourceHasFacebook = !!existingPost.facebook;
+    const sourceHasInstagram = !!existingPost.instagram;
+    const targetHasFacebook = !!targetPost.facebook;
+    const targetHasInstagram = !!targetPost.instagram;
+
+    if (sourceHasFacebook && targetHasFacebook) {
+      return { success: false, error: 'Target date already has a Facebook post' };
+    }
+    if (sourceHasInstagram && targetHasInstagram) {
+      return { success: false, error: 'Target date already has an Instagram post' };
+    }
+
+    // If there's a post on the target date but no platform conflict,
+    // we still can't move because each date can only have one post document
+    return { success: false, error: 'Target date already has a post' };
+  }
+
+  // Perform the move: create new document, delete old one
+  const db = getFirebaseDb();
+  const batch = writeBatch(db);
+
+  const newPostRef = getPostDoc(workspaceId, newDate);
+  const oldPostRef = getPostDoc(workspaceId, oldDate);
+
+  // Create new post with updated date
+  const newPost = sanitizeForFirestore({
+    ...existingPost,
+    date: newDate,
+    updatedAt: Timestamp.now(),
+  });
+
+  batch.set(newPostRef, newPost);
+  batch.delete(oldPostRef);
+
+  try {
+    await batch.commit();
+    return { success: true };
+  } catch (error) {
+    console.error('Error changing post date:', error);
+    return { success: false, error: 'Failed to update post' };
+  }
+}
+
 // Get dates that already have posts (for scheduling)
 export async function getExistingPostDates(
   workspaceId: string,
